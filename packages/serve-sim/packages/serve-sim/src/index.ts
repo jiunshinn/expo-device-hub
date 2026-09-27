@@ -39,7 +39,10 @@ import {
   waitForLaunchUpdates,
 } from "./launch-manager";
 import { killOwnListeners } from "./ports";
-import { findBootedDevice, resolveDevice } from "./device";
+import { bootedDevices, findBootedDevice, resolveDevice } from "./device";
+import {
+  type SlimProfile, describeSlim, resolveSlimProfile, restoreSimulator, slimSimulator, slimStatus,
+} from "./sim-slim";
 import { openSimulatorHost } from "./simulator-host";
 import { runStreamDebugLog, startStreamDebugLog } from "./stream-debug-log";
 import { permissions } from "./permissions";
@@ -1084,6 +1087,61 @@ async function caDebug(option: string, stateRaw: string, deviceArg?: string) {
   });
 }
 
+/** `--slim-simulator`: a failure is reported, never allowed to stop the stream. */
+async function slimBeforeStreaming(udid: string, profile: SlimProfile): Promise<void> {
+  try {
+    const result = await slimSimulator(udid, profile);
+    console.error(describeSlim(udid, profile, result));
+    for (const failure of result.failed) console.error(`[slim] ${failure.label}: ${failure.error}`);
+  } catch (error) {
+    console.error(`[slim] ${udid}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+/** `serve-sim slim-simulator`: apply, undo, or show the profile on one simulator. */
+async function slimSimulatorCommand(opts: { device?: string; profile: string; undo?: boolean; status?: boolean }) {
+  let profile: SlimProfile;
+  try {
+    profile = resolveSlimProfile(opts.profile);
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exit(1);
+  }
+  let udid: string;
+  if (opts.device) {
+    udid = resolveDevice(opts.device);
+  } else {
+    // Never guess between simulators: this changes the device until it is undone.
+    const booted = bootedDevices();
+    if (booted.length !== 1) {
+      console.error(booted.length === 0
+        ? "No booted simulator. Boot one or pass -d <udid|name>."
+        : `${booted.length} simulators are booted (${booted.map((d) => d.name).join(", ")}). Pass -d <udid|name>.`);
+      process.exit(1);
+    }
+    udid = booted[0]!.udid;
+  }
+  if (opts.status) {
+    for (const { category, inDefault, off } of await slimStatus(udid)) {
+      const state = off === 0 ? "on" : off === category.labels.length ? "off" : "partly off";
+      console.log(`${category.id.padEnd(13)} ${state.padEnd(10)} ${`${off}/${category.labels.length}`.padEnd(6)} ${inDefault ? "default" : "       "}  ${category.loses}`);
+    }
+    return;
+  }
+  if (opts.undo) {
+    const { enabled, failed } = await restoreSimulator(udid, profile);
+    console.log(`[slim] ${udid}: ${profile.categories.join(",")}: ${enabled.length} enabled. ` +
+      `Reboot the simulator to start them: xcrun simctl shutdown ${udid} && xcrun simctl boot ${udid}`);
+    for (const failure of failed) console.error(`[slim] ${failure.label}: ${failure.error}`);
+    process.exitCode = failed.length ? 1 : 0;
+    return;
+  }
+  const result = await slimSimulator(udid, profile);
+  console.log(describeSlim(udid, profile, result));
+  for (const failure of result.failed) console.error(`[slim] ${failure.label}: ${failure.error}`);
+  process.exitCode = result.failed.length ? 1 : 0;
+}
+
 // Ask the helper to invoke -[SimDevice simulateMemoryWarning].
 async function memoryWarning(deviceArg?: string) {
   const stateFile = readState(deviceArg);
@@ -2034,6 +2092,11 @@ program
     (value: string, prev: string[]) => [...prev, value],
     [] as string[],
   )
+  .option(
+    "--slim-simulator <profile>",
+    "Switch off simulator services the stream does not need before streaming: " +
+      "default, all, or a comma-separated list of categories (see `serve-sim slim-simulator --status`)",
+  )
   .option("-l, --list [device]", "List running streams")
   .option("-k, --kill [device]", "Kill running stream(s)")
   .addHelpText(
@@ -2149,6 +2212,13 @@ Examples:
       console.error(error instanceof Error ? error.message : error);
       process.exit(1);
     }
+    let slim: SlimProfile | undefined;
+    try {
+      slim = opts.slimSimulator === undefined ? undefined : resolveSlimProfile(opts.slimSimulator);
+    } catch (error) {
+      console.error(error instanceof Error ? error.message : error);
+      process.exit(1);
+    }
     // Only take over device selection when something has to happen before the
     // run mode starts. Otherwise follow and detach pick their own target, as
     // they did before this flag existed.
@@ -2193,6 +2263,7 @@ Examples:
         ...(openUrl ? ["--open-url"] : []),
         ...(capabilities.enable.length > 0 ? ["--enable"] : []),
         ...(capabilities.disable.length > 0 ? ["--disable"] : []),
+        ...(slim ? ["--slim-simulator"] : []),
       ];
       if (unsupported.length > 0) {
         console.error(
@@ -2225,6 +2296,7 @@ Examples:
         }
         for (const udid of targets) {
           await ensureBooted(udid);
+          if (slim) await slimBeforeStreaming(udid, slim);
           if (sessionStopping) return;
         }
         const isStreamHelper = process.env[STREAM_HELPER_ENV] === "1";
@@ -2383,5 +2455,13 @@ program
   .argument("[args...]")
   .action((args: string[]) => uiSettings(args));
 
+program
+  .command("slim-simulator")
+  .description("Switch off simulator services a stream does not need, or back on with --undo")
+  .option(...deviceOpt)
+  .option("--profile <profile>", "default, all, or a comma-separated list of categories", "default")
+  .option("--undo", "Switch the profile's services back on")
+  .option("--status", "Show each category's state on the device and what an app loses without it")
+  .action(slimSimulatorCommand);
 
 await program.parseAsync(process.argv);

@@ -12,6 +12,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html):
 
 - Add strict host hardware H.264 encoding for Android gRPC streaming with `--encoder hardware` and an Encoder control in the standalone UI. Software remains the default; stream-mode and health APIs report the active backend and hardware probe failures.
 
+### Breaking
+
+- Remove `GET /api/screenshot`. It now returns 405, and clients must use
+  `POST /api/screenshot`.
+
 ### Added
 
 - Persist screenshot captures for EAS artifact upload when `EXPO_DEVICE_HUB_SCREENSHOT_DIRECTORY` is configured. A save failure is logged, writes a `.failed.json` record for the EAS worker to report, and the screenshot is still returned, but it is not yet recorded as a session event.
@@ -47,8 +52,6 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html):
   audio disabled) because its input protocol supports the established control
   semantics; emulator gRPC input remains available when avoiding that extra
   process is preferable.
-- The standalone UI and README request screenshots with `POST /api/screenshot`.
-  `GET` remains accepted for compatibility.
 
 ## 0.0.5 - 2026-07-12
 

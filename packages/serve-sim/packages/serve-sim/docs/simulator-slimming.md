@@ -62,7 +62,7 @@ Each service belongs to one category. The default profile is the first eight.
 | `pim` | | Contacts and contact pickers, EventKit calendars and reminders, and Mail. |
 | `web` | | Universal links and associated domains, web push, and Safari sync. |
 | `health` | | HealthKit, fitness, and workouts. |
-| `apps` | | WeatherKit, MapKit snapshots and Maps sync, Game Center, game controllers, News, and Tips. |
+| `apps` | | Maps (it retries without `navd` and uses a full core), WeatherKit, MapKit snapshots, Game Center, game controllers, News, and Tips. |
 | `other` | | On-demand assets (dictionaries, fonts, speech and vision models), ID verification, and managed configuration. |
 
 In a VM, nearly all of the CPU and log volume belongs to `push`. The other

@@ -75,7 +75,7 @@ export const SLIM_CATEGORIES: readonly SlimCategory[] = [
     labels: [
       "com.apple.rapportd", "com.apple.companiond", "com.apple.carkitd", "com.apple.wcd", "com.apple.tvremoted",
       "com.apple.avatarsd", "com.apple.stickersd", "com.apple.sociallayerd", "com.apple.announced",
-      "com.apple.navd", "com.apple.findmy.findmylocated",
+      "com.apple.findmy.findmylocated",
     ],
   },
   {
@@ -156,10 +156,12 @@ export const SLIM_CATEGORIES: readonly SlimCategory[] = [
     ],
   },
   {
+    // navd is Maps' navigation daemon: without it Maps retries in a tight loop and takes
+    // over a core, so it stays with Maps here and out of the default profile.
     id: "apps",
-    loses: "WeatherKit, MapKit snapshots and Maps sync, Game Center, game controllers, News, and Tips.",
+    loses: "Maps (it retries without navd and uses a full core), WeatherKit, MapKit snapshots, Game Center, game controllers, News, and Tips.",
     labels: [
-      "com.apple.newsd", "com.apple.weatherd", "com.apple.Maps.mapssyncd", "com.apple.Maps.mapspushd",
+      "com.apple.navd", "com.apple.newsd", "com.apple.weatherd", "com.apple.Maps.mapssyncd", "com.apple.Maps.mapspushd",
       "com.apple.Maps.geocorrectiond", "com.apple.maps.destinationd", "com.apple.MapKit.SnapshotService",
       "com.apple.jetpackassetd", "com.apple.tipsd", "com.apple.gamed", "com.apple.gamesaved",
       "com.apple.GameController.gamecontrollerd",

@@ -13,7 +13,7 @@ import type { Socket } from "net";
 // lines, and `serve-sim/middleware` is embedded in third-party dev servers, so
 // importing the dependency keeps the proxy working regardless of runtime.
 import { WebSocket } from "ws";
-import { saveScreenshotArtifact } from "./screenshot-artifacts";
+import { saveScreenshotArtifact, type ScreenshotOutcome } from "./screenshot-artifacts";
 import { createAxStreamerCache } from "./ax";
 import { readCameraStatus } from "./camera-helper";
 import { createMetricsSamplerCache, MetricsSampler, type MetricsSamplerCache } from "./metrics-sampler";
@@ -33,6 +33,7 @@ import {
 } from "./session-auth";
 import {
   eventLogEventForAction,
+  eventLogEventForScreenshot,
   readEventLog,
   recordEventLogEvent,
   subscribeEventLog,
@@ -166,6 +167,14 @@ function recordActionEvent(
     if (event) recordEventLogEvent(event);
   } catch {
     // Event-log recording is diagnostic; it must never break the action path.
+  }
+}
+
+function recordScreenshotEvent(udid: string, outcome: ScreenshotOutcome): void {
+  try {
+    recordEventLogEvent(eventLogEventForScreenshot(udid, outcome));
+  } catch {
+    // Event-log recording is diagnostic; it must never break the screenshot response.
   }
 }
 
@@ -2400,7 +2409,7 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
           );
         });
         const png = await readFile(file);
-        await saveScreenshotArtifact(png);
+        recordScreenshotEvent(udid, await saveScreenshotArtifact(png));
         res.writeHead(200, {
           "Cache-Control": "no-store",
           "Content-Type": "image/png",
@@ -2411,6 +2420,7 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
         const message =
           (typeof stderr === "string" && stderr.trim()) ||
           (err instanceof Error ? err.message : String(err));
+        recordScreenshotEvent(udid, { status: "capture-failed", error: message });
         res.writeHead(500, {
           "Cache-Control": "no-store",
           "Content-Type": "application/json",

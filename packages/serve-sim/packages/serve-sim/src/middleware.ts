@@ -63,6 +63,7 @@ import { type WebMiddleware } from "./runtime-utils";
 import { connectToFetch, type ConnectMiddleware } from "./connect-to-fetch";
 import { PasteboardTooLargeError, writeSimPasteboard } from "./sim-pasteboard";
 import { readSimPasteboardResult } from "./sim-pasteboard-reader";
+import { PasteboardCopyTimeoutError } from "./sim-pasteboard-copy";
 
 type SimReq = IncomingMessage;
 type SimRes = ServerResponse;
@@ -2529,7 +2530,22 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
           return;
         }
 
-        const result = await readSimPasteboardResult(udid);
+        // Copy presses Command+C in an input turn and reads under the pasteboard lock, so another
+        // viewer can't change the text in between. It needs the device's input session, which a
+        // viewer's socket keeps running.
+        const copy = new URLSearchParams(qIndex === -1 ? "" : rawUrl.slice(qIndex + 1)).get("copy") === "1";
+        const session = copy ? peekDeviceSession(udid) : undefined;
+        if (copy && !session) {
+          res.writeHead(409, {
+            ...PASTEBOARD_RESPONSE_HEADERS,
+            "Content-Type": "application/json",
+          });
+          res.end(JSON.stringify({ ok: false, error: "No simulator input session for this device" }));
+          return;
+        }
+        const result = session
+          ? await session.copyPasteboard()
+          : await readSimPasteboardResult(udid);
         res.writeHead(200, {
           ...PASTEBOARD_RESPONSE_HEADERS,
           "Content-Type": "application/json",
@@ -2545,11 +2561,16 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
           return;
         }
         console.error(`[serve-sim] Could not access the simulator pasteboard on ${udid}:`, error);
-        res.writeHead(500, {
+        res.writeHead(error instanceof PasteboardCopyTimeoutError ? 504 : 500, {
           ...PASTEBOARD_RESPONSE_HEADERS,
           "Content-Type": "application/json",
         });
-        res.end(JSON.stringify({ ok: false, error: "Could not access the simulator pasteboard" }));
+        res.end(JSON.stringify({
+          ok: false,
+          error: error instanceof PasteboardCopyTimeoutError
+            ? error.message
+            : "Could not access the simulator pasteboard",
+        }));
       }
       return;
     }

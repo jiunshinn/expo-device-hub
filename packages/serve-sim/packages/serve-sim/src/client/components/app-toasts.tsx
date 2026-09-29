@@ -155,9 +155,11 @@ function PasteField({ onSubmit }: { onSubmit: (text: string) => void }) {
 
 export function ClipboardToastContent({
   toast,
+  onCopy,
   onPaste,
 }: {
   toast: ClipboardToast;
+  onCopy?: () => void;
   onPaste?: (text: string) => void;
 }) {
   const pending = toast.status === "pending";
@@ -165,7 +167,9 @@ export function ClipboardToastContent({
     ? "#a5b4fc"
     : toast.status === "copied"
       ? "#4ade80"
-      : "#f87171";
+      : toast.status === "manual"
+        ? "#fcd34d"
+        : "#f87171";
 
   return (
     <div
@@ -183,7 +187,15 @@ export function ClipboardToastContent({
           {toast.message}
         </span>
       )}
-
+      {toast.status === "manual" && (
+        <button
+          type="button"
+          onClick={onCopy}
+          className="shrink-0 px-2 py-0.5 rounded border border-white/20 text-white/90 hover:bg-white/10"
+        >
+          Copy
+        </button>
+      )}
     </div>
   );
 }

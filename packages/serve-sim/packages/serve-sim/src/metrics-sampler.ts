@@ -9,7 +9,7 @@ import { execFile } from "node:child_process";
 import { cpus } from "node:os";
 import { promisify } from "node:util";
 
-import { foregroundTracker, frontmostAppViaAx, type ForegroundApp } from "./foreground-tracker";
+import { foregroundTracker, frontmostAppOf, frontmostAppViaAx, type ForegroundApp, type ForegroundSubscription } from "./foreground-tracker";
 
 const execFileAsync = promisify(execFile);
 
@@ -126,12 +126,6 @@ export interface SampleDeps {
 /** Run a host command with a bounded timeout and output buffer, resolving its stdout. */
 const runCommand = (file: string, args: string[], signal?: AbortSignal): Promise<string> =>
   execFileAsync(file, args, { timeout: 3000, maxBuffer: 8 * 1024 * 1024, signal }).then((r) => r.stdout);
-
-/** The current foreground app: the tracker when it's warm, else the AX bridge; null when unknown. */
-function frontmostAppOf(udid: string): Promise<ForegroundApp | null> {
-  const tracked = foregroundTracker.peek(udid);
-  return tracked ? Promise.resolve(tracked) : frontmostAppViaAx(udid);
-}
 
 /**
  * CPU side: the app's processes + their %CPU, and which app they belong to. `ps` and the
@@ -326,6 +320,8 @@ export class MetricsSampler {
   // The default sampler owns a nettop poller and feeds its rate into sampleUserApp; an injected
   // `sample` (tests) supplies the network rate itself, so no poller is spawned.
   private readonly network: NetworkThroughputMonitor | null;
+  private foregroundSubscription: ForegroundSubscription | null = null;
+  private foregroundSeed: Promise<ForegroundApp | null> | null = null;
 
   /** Build a sampler for one udid, resolving the interval, clock, and host core count. */
   constructor(opts: MetricsSamplerOptions) {
@@ -337,7 +333,17 @@ export class MetricsSampler {
     } else {
       const network = new NetworkThroughputMonitor();
       this.network = network;
-      this.sample = (udid) => sampleUserApp(udid, { networkRate: (pids) => network.rateForPids(pids) });
+      this.sample = (udid) => sampleUserApp(udid, {
+        frontmostApp: async () => {
+          const tracked = foregroundTracker.peek(udid);
+          if (tracked) return tracked;
+          const seed = await (this.foregroundSeed ??= frontmostAppOf(udid));
+          // The stream only reports transitions. If its initial history lookup missed an
+          // already visible app, AX may identify it later without another boot-log scan.
+          return seed ?? frontmostAppViaAx(udid);
+        },
+        networkRate: (pids) => network.rateForPids(pids),
+      });
     }
     this.meta = {
       schemaVersion: METRICS_SCHEMA_VERSION,
@@ -410,6 +416,10 @@ export class MetricsSampler {
   start(): void {
     if (this.timer) return;
     this.network?.start();
+    if (this.network) {
+      this.foregroundSubscription = foregroundTracker.subscribe(this.meta.udid);
+      this.foregroundSeed = frontmostAppOf(this.meta.udid);
+    }
     this.startedAt ??= this.now();
     // Track this loop's own timer identity: a stop()+start() during an in-flight tick would make
     // this.timer truthy again, so a bare `if (this.timer)` check would schedule a second, overlapping
@@ -429,6 +439,9 @@ export class MetricsSampler {
   /** Stop the poll loop and the network poller. */
   stop(): void {
     this.network?.stop();
+    this.foregroundSubscription?.unsubscribe();
+    this.foregroundSubscription = null;
+    this.foregroundSeed = null;
     if (this.timer) {
       clearTimeout(this.timer);
       this.timer = null;

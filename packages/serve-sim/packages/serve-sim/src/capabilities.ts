@@ -1,3 +1,5 @@
+import { readLaunchState } from "./launch-state";
+
 /** A dylib loaded inside each eligible app process. */
 export interface PreparedCapability {
   dylib: string;
@@ -88,6 +90,28 @@ export class UnknownCapabilityError extends Error {
         (known.length > 0 ? `Available: ${known.join(", ")}.` : "None are registered."),
     );
   }
+}
+
+// On-demand enables, like a clipboard read, must not override a device's --disable.
+const disabledByDevice = new Map<string, ReadonlySet<string>>();
+
+export function rememberDisabledCapabilities(udid: string, names: readonly string[]): void {
+  disabledByDevice.set(udid, new Set(names));
+}
+
+export function forgetDisabledCapabilities(udid: string): void {
+  disabledByDevice.delete(udid);
+}
+
+export function capabilityIsDisabled(udid: string, name: string): boolean {
+  const shared = readLaunchState(udid);
+  if (shared?.disabledCapabilities?.[name]?.length) return true;
+  // An explicit enable on this device supersedes a prior disable from another session.
+  if (shared?.capabilities[name]) return false;
+  // A session's disable also applies to devices selected later in the grid, even if that
+  // device has its own local entry from a previous launch in this process.
+  for (const names of disabledByDevice.values()) if (names.has(name)) return true;
+  return false;
 }
 
 export function capabilitiesToApply({

@@ -44,6 +44,7 @@ import { killOwnListeners } from "./ports";
 import { findBootedDevice, resolveDevice } from "./device";
 import { openSimulatorHost } from "./simulator-host";
 import { runStreamDebugLog, startStreamDebugLog } from "./stream-debug-log";
+import { clipboardCapability } from "./sim-pasteboard-reader";
 import { permissions } from "./permissions";
 import { uiSettings } from "./ui-settings";
 import { debugCli, debugHelper, debugState } from "./debug";
@@ -2260,6 +2261,8 @@ Examples:
         }
       } catch (error) {
         console.error(error instanceof Error ? error.message : error);
+        sessionStopping = true;
+        await disarmDevicesArmedHereAsync();
         process.exit(1);
       }
     }
@@ -2391,6 +2394,7 @@ program
   .argument("[args...]")
   .action((args: string[]) => uiSettings(args));
 
+registerCapability(clipboardCapability);
 registerCapability(captureRuntime.capability);
 
 await program.parseAsync(process.argv);

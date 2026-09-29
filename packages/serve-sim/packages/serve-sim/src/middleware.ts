@@ -60,7 +60,8 @@ import { claimHelperHidSocket, type UpgradeHandlerWebSocket } from "./middleware
 import { UI_OPTIONS, getUiStatus, normalizeUiValue, setUiOption } from "./ui-settings";
 import { type WebMiddleware } from "./runtime-utils";
 import { connectToFetch, type ConnectMiddleware } from "./connect-to-fetch";
-import { PasteboardTooLargeError, readSimPasteboardResult, writeSimPasteboard } from "./sim-pasteboard";
+import { PasteboardTooLargeError, writeSimPasteboard } from "./sim-pasteboard";
+import { readSimPasteboardResult } from "./sim-pasteboard-reader";
 
 type SimReq = IncomingMessage;
 type SimRes = ServerResponse;

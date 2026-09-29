@@ -28,6 +28,11 @@ import {
   type NativeUnsubscribe,
 } from "./native";
 import { isSoftwareKeyboardVisible } from "./ax";
+import { isLiftedModifier, simCopyHidEvents, simPasteHidEvents } from "./client/utils/sim-clipboard";
+import { HID_USAGE_BY_CODE } from "./client/utils/hid";
+import { MAX_PASTEBOARD_TEXT_BYTES } from "./sim-pasteboard";
+import { pasteTextIntoSim } from "./sim-pasteboard-paste";
+import { EXEC_WS_MAX_MESSAGE_BYTES } from "./exec-ws-utils";
 import { debugKeyboard } from "./debug";
 import { isHingeAngle, type HingeAngleResult } from "./hinge-angle";
 import { validatePanelRoute } from "./panel-route";
@@ -870,7 +875,7 @@ export class DeviceSession {
       if (this.phase !== "running" || this.detachedHidSockets.has(ws)) return;
       const buffer = Buffer.isBuffer(data) ? data : Buffer.from(data);
       const isOrderedMessage = buffer[0] === 0x03 || buffer[0] === 0x05 ||
-        buffer[0] === 0x06 || buffer[0] === 0x0b || buffer[0] === 0x0e;
+        buffer[0] === 0x06 || buffer[0] === 0x0b || buffer[0] === 0x0e || buffer[0] === 0x12;
       const inFlight = this.inFlightHidMessages.get(ws) ?? 0;
       if (inFlight >= MAX_PENDING_INPUT_OPERATIONS_PER_SOCKET) {
         this.overloadHidSocket(ws);
@@ -1149,6 +1154,36 @@ export class DeviceSession {
         }
         break;
       }
+      case 0x12: {
+        // The browser refuses larger requests itself; don't parse one from a direct client.
+        const m = data.length - 1 > EXEC_WS_MAX_MESSAGE_BYTES ? null : json<{ requestId: unknown; text: unknown }>();
+        const requestId = m?.requestId;
+        let ok = false;
+        let cleanupWarning: string | null = null;
+        if (m && typeof requestId === "number" && Number.isSafeInteger(requestId) && requestId > 0 &&
+          (m.text === undefined || (typeof m.text === "string" && Buffer.byteLength(m.text, "utf8") <= MAX_PASTEBOARD_TEXT_BYTES))) {
+          const text = m.text;
+          const operation = this.queueInputOperation(ws, async () => {
+            if (this.hid.inputUnavailable) throw new Error("Simulator input is unavailable");
+            cleanupWarning = typeof text === "string"
+              ? await pasteTextIntoSim(this.udid, text, () => this.sendPasteShortcut(ws))
+              : await this.sendPasteShortcut(ws);
+          });
+          if (operation) {
+            try {
+              await operation;
+              ok = true;
+            } catch (error) {
+              console.error(`[serve-sim] Could not paste into simulator ${this.udid}:`, error);
+            }
+          }
+        }
+        if (this.hidSockets.has(ws)) {
+          try { ws.send(Buffer.concat([Buffer.from([0x92]), Buffer.from(JSON.stringify({ requestId, ok, ...(ok ? (cleanupWarning ? { cleanupWarning } : {}) : { error: "Could not paste into the simulator" }) }))])); }
+          catch {}
+        }
+        break;
+      }
     }
   }
 
@@ -1217,27 +1252,103 @@ export class DeviceSession {
     return axTypeKeyboardCharacterAsync(this.udid, character).catch(() => false);
   }
 
-  private async updateHidKey(ws: HidSocket, type: "down" | "up", usage: number): Promise<void> {
+  /** Press Command+V for one viewer's paste; see `sendCommandShortcut`. */
+  private sendPasteShortcut(ws: HidSocket): Promise<string | null> {
+    return this.sendCommandShortcut("KeyV", ws);
+  }
+
+  /**
+   * Press Command with `code`.
+   *
+   * The chord has to match what the simulator currently sees, not what one viewer holds.
+   * `activeHidKeyUsageCounts` is device-wide, so another viewer's Control or Shift is still
+   * down at the simulator and would turn Command+V into a different shortcut. Those modifiers
+   * are lifted at the HID layer only and put back afterwards: their owners never released them,
+   * so the ownership counts must not change. A shortcut key someone already holds would absorb
+   * the tap, so it is lifted too, but not put back: pressing it again would type the letter
+   * after the paste. Its owner's next press or release still reaches the simulator.
+   *
+   * With a socket, Command and the key go through `updateHidKey`, which gives that socket's
+   * cleanup a way to release them on a disconnect. Without one, the chord releases them itself.
+   */
+  private async sendCommandShortcut(code: "KeyV" | "KeyC", ws: HidSocket | null): Promise<string | null> {
+    if (ws && !this.hidSockets.has(ws)) throw new Error("Clipboard viewer disconnected");
+    const shortcutKey = HID_USAGE_BY_CODE[code]!;
+    const events = code === "KeyV" ? simPasteHidEvents : simCopyHidEvents;
+    const pressedAtSimulator = new Set(this.activeHidKeyUsageCounts.keys());
+    const shortcutKeyHeld = pressedAtSimulator.has(shortcutKey);
+    const liftedModifiers = new Set<number>();
+    const unownedKeysDown = new Set<number>();
+    const ownedKeysDown = new Set<number>();
+    let shortcutKeyReleased = false;
+    let cleanupFailed = false;
+    let liftedShortcutKey = false;
+    let shortcutKeyPressed = false;
+    try {
+      if (shortcutKeyHeld) {
+        await this.hid.keyChecked("up", shortcutKey);
+        liftedShortcutKey = true;
+      }
+      for (const event of events(pressedAtSimulator)) {
+        if (event.type === "up") await new Promise((resolve) => setTimeout(resolve, 30));
+        if (!shortcutKeyReleased && this.hid.inputUnavailable) throw new Error("Simulator input is unavailable");
+        try {
+          if (isLiftedModifier(event.usage)) {
+            await this.hid.keyChecked(event.type, event.usage);
+            if (event.type === "up") liftedModifiers.add(event.usage);
+            else liftedModifiers.delete(event.usage);
+          } else if (!ws || (shortcutKeyHeld && event.usage === shortcutKey)) {
+            await this.hid.keyChecked(event.type, event.usage);
+            if (shortcutKeyHeld && event.usage === shortcutKey) shortcutKeyPressed = event.type === "down";
+            if (!ws && event.type === "down") unownedKeysDown.add(event.usage);
+            else unownedKeysDown.delete(event.usage);
+          } else {
+            await this.updateHidKey(ws, event.type, event.usage, true);
+            if (event.type === "down") ownedKeysDown.add(event.usage);
+            else ownedKeysDown.delete(event.usage);
+          }
+        } catch (error) {
+          // The paste key was released, so the app may have pasted already. Retry cleanup
+          // below and report any remaining held key separately from the paste result.
+          if (!shortcutKeyReleased) throw error;
+        }
+        if (event.type === "up" && event.usage === shortcutKey) shortcutKeyReleased = true;
+      }
+    } finally {
+      // A failed chord must not leave its own keys down or another viewer's modifier up.
+      for (const usage of unownedKeysDown) await this.hid.keyChecked("up", usage).catch(() => { cleanupFailed = true; });
+      if (ws) for (const usage of ownedKeysDown) await this.updateHidKey(ws, "up", usage, true).catch(() => { cleanupFailed = true; });
+      for (const usage of liftedModifiers) await this.hid.keyChecked("down", usage).catch(() => { cleanupFailed = true; });
+      if (liftedShortcutKey && !shortcutKeyReleased && !shortcutKeyPressed) {
+        await this.hid.keyChecked("down", shortcutKey).catch(() => { cleanupFailed = true; });
+      }
+    }
+    return cleanupFailed ? "A simulator key may still be held. Release it or reconnect input." : null;
+  }
+
+  private async updateHidKey(ws: HidSocket, type: "down" | "up", usage: number, checked = false): Promise<void> {
     const socketUsages = this.activeHidKeyUsages.get(ws);
     if (!socketUsages) return;
+    const key = (phase: "down" | "up") => checked ? this.hid.keyChecked(phase, usage) : this.hid.key(phase, usage);
     const owners = this.activeHidKeyUsageCounts.get(usage) ?? 0;
     if (type === "down") {
       if (socketUsages.has(usage)) {
-        await this.hid.key("down", usage);
+        await key("down");
         return;
       }
-      if (owners === 0) await this.hid.key("down", usage);
+      if (owners === 0) await key("down");
       socketUsages.add(usage);
       this.activeHidKeyUsageCounts.set(usage, owners + 1);
       return;
     }
-    if (!socketUsages.delete(usage)) return;
+    if (!socketUsages.has(usage)) return;
     if (owners <= 1) {
+      await key("up");
       this.activeHidKeyUsageCounts.delete(usage);
-      await this.hid.key("up", usage);
     } else {
       this.activeHidKeyUsageCounts.set(usage, owners - 1);
     }
+    socketUsages.delete(usage);
   }
 
   private queueInputOperation(ws: HidSocket, run: () => Promise<void>): Promise<void> | null {

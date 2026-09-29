@@ -51,6 +51,7 @@ import {
 import { serveDeviceKitModelAsset } from "./devicekit-model";
 import { validatePanelRoute } from "./panel-route";
 import { createExecWebSocketHandler, type UiRequestHandler } from "./exec-ws";
+import { EXEC_WS_MAX_MESSAGE_BYTES } from "./exec-ws-utils";
 import { crashRuntime } from "./crash/runtime";
 import { handleCrashesRequestAfter, handleCrashReportRequest } from "./crash/routes";
 export { handleCrashesRequest, handleCrashReportRequest } from "./crash/routes";
@@ -617,7 +618,7 @@ type ParsedWebSocketFrame = {
   consumed: number;
 };
 
-function parseWebSocketFrame(buffer: Buffer): ParsedWebSocketFrame | null {
+function parseWebSocketFrame(buffer: Buffer, maxPayloadBytes = Number.MAX_SAFE_INTEGER): ParsedWebSocketFrame | null {
   if (buffer.length < 2) return null;
   const opcode = buffer[0]! & 0x0f;
   const masked = (buffer[1]! & 0x80) !== 0;
@@ -636,6 +637,7 @@ function parseWebSocketFrame(buffer: Buffer): ParsedWebSocketFrame | null {
     length = Number(bigLength);
     offset += 8;
   }
+  if (length > maxPayloadBytes) throw new Error("WebSocket frame too large");
   const maskOffset = offset;
   if (masked) offset += 4;
   if (buffer.length < offset + length) return null;
@@ -970,7 +972,7 @@ function rawHidSocket(socket: Socket, head: Buffer): HidSocket {
     for (;;) {
       let frame: ParsedWebSocketFrame | null;
       try {
-        frame = parseWebSocketFrame(buffered);
+        frame = parseWebSocketFrame(buffered, EXEC_WS_MAX_MESSAGE_BYTES);
       } catch {
         shutdown();
         return;
